@@ -17,12 +17,12 @@ struct Item<T> {
     //   -1     -> in use by writer
     use_count: AtomicI16,
 
-    // the actual data being stored
-    data: UnsafeCell<T>,
-
     // A simple counter for the number of times the writer had gone through the entire array
     // when it last wrote data to this item. Wraps upon overflow. Used to detect dropouts.
     lap_count: UnsafeCell<u16>,
+
+    // the actual data being stored
+    data: UnsafeCell<T>,
 }
 
 pub struct Reader<T> {
@@ -125,16 +125,14 @@ where
 
         // try to increment the use count, spin until the old use count was definitely positive
         let mut expected_use_count = 0;
-        while let Some(actual_use_count) = item
-            .use_count
-            .compare_exchange(
-                expected_use_count,
-                expected_use_count + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
-            .err()
-        {
+        while let Err(actual_use_count) = item.use_count.compare_exchange(
+            expected_use_count,
+            expected_use_count + 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            debug_assert!(actual_use_count >= -1, "Invalid use count");
+            debug_assert!(actual_use_count < i16::MAX, "Reader overflow");
             expected_use_count = actual_use_count.max(0);
             std::hint::spin_loop();
         }
@@ -218,18 +216,16 @@ impl<T> Writer<T> {
         // Get the current write index
         let index = self.write_index.load(Ordering::SeqCst);
 
-        // compute the next index
-        let mut next_index = index + 1;
-
         // fetch the item about to be written to
         let item = &self.data[index];
 
         // spin until use count is zero, write -1
-        while !item
-            .use_count
-            .compare_exchange(0, -1, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+        while let Err(actual_use_count) =
+            item.use_count
+                .compare_exchange(0, -1, Ordering::SeqCst, Ordering::SeqCst)
         {
+            debug_assert!(actual_use_count > 0, "Invalid use count");
+
             std::hint::spin_loop();
         }
 
@@ -242,10 +238,11 @@ impl<T> Writer<T> {
             *item.lap_count.get() = self.lap_count;
         }
 
-        // If the index wrapped around, increment the lap count
+        // If the index wraps around, increment the lap count
+        let mut next_index = index + 1;
         if next_index == self.data.len() {
             next_index = 0;
-            self.lap_count += 1
+            self.lap_count = self.lap_count.wrapping_add(1);
         }
 
         // update the write index to be visible by readers

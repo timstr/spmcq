@@ -334,3 +334,198 @@ fn test_two_readers_three_threads() {
     reader2_thread.join().unwrap();
     writer_thread.join().unwrap();
 }
+
+#[test]
+fn test_one_reader_two_threads_high_throughput() {
+    let (mut reader, mut writer) = ring_buffer::<usize>(32);
+
+    const ITERATIONS: usize = 1024 * 1024 * 64;
+
+    let reader_thread = std::thread::spawn(move || {
+        for _ in 0..ITERATIONS {
+            let Some(value) = reader.read().value() else {
+                continue;
+            };
+            let bytes = value.to_be_bytes();
+
+            // Expect the same bit pattern in all bytes
+            assert!(bytes.iter().all(|b| *b == bytes[0]));
+        }
+    });
+
+    let writer_thread = std::thread::spawn(move || {
+        for i in 0..ITERATIONS {
+            // Copy the same bit pattern accross all bytes
+            let b = (i & 0xff) as u8;
+            let value = usize::from_be_bytes([b; 8]);
+
+            writer.write(value);
+        }
+    });
+
+    reader_thread.join().unwrap();
+    writer_thread.join().unwrap();
+}
+
+#[test]
+fn test_two_readers_three_threads_high_throughput() {
+    let (mut reader1, mut writer) = ring_buffer::<usize>(32);
+    let mut reader2 = reader1.clone();
+
+    const ITERATIONS: usize = 1024 * 1024 * 64;
+
+    let reader1_thread = std::thread::spawn(move || {
+        for _ in 0..ITERATIONS {
+            let Some(value) = reader1.read().value() else {
+                continue;
+            };
+            let bytes = value.to_be_bytes();
+
+            // Expect the same bit pattern in all bytes
+            assert!(bytes.iter().all(|b| *b == bytes[0]));
+        }
+    });
+
+    let reader2_thread = std::thread::spawn(move || {
+        for _ in 0..ITERATIONS {
+            let Some(value) = reader2.read().value() else {
+                continue;
+            };
+            let bytes = value.to_be_bytes();
+
+            // Expect the same bit pattern in all bytes
+            assert!(bytes.iter().all(|b| *b == bytes[0]));
+        }
+    });
+
+    let writer_thread = std::thread::spawn(move || {
+        for i in 0..ITERATIONS {
+            // Copy the same bit pattern accross all bytes
+            let b = (i & 0xff) as u8;
+            let value = usize::from_be_bytes([b; 8]);
+
+            writer.write(value);
+        }
+    });
+
+    reader1_thread.join().unwrap();
+    reader2_thread.join().unwrap();
+    writer_thread.join().unwrap();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Blob {
+    data: [u8; 1024],
+}
+
+impl Blob {
+    fn new(value: u8) -> Blob {
+        Blob {
+            data: [value; 1024],
+        }
+    }
+
+    fn all_equal_to(&self, value: u8) -> bool {
+        self.data.iter().all(|b| *b == value)
+    }
+
+    fn all_equal(&self) -> bool {
+        self.all_equal_to(self.data[0])
+    }
+}
+
+impl Default for Blob {
+    fn default() -> Self {
+        Self { data: [0; 1024] }
+    }
+}
+
+#[test]
+fn test_custom_data_type_one_thread() {
+    let (mut reader, mut writer) = ring_buffer::<Blob>(32);
+
+    assert_eq!(reader.read(), ReadResult::Empty);
+
+    writer.write(Blob::new(0));
+
+    assert_eq!(reader.read(), ReadResult::Ok(Blob::new(0)));
+    assert_eq!(reader.read(), ReadResult::Empty);
+
+    writer.write(Blob::new(1));
+
+    assert_eq!(reader.read(), ReadResult::Ok(Blob::new(1)));
+    assert_eq!(reader.read(), ReadResult::Empty);
+
+    for _ in 0..64 {
+        writer.write(Blob::new(3));
+    }
+
+    assert_eq!(reader.read(), ReadResult::Dropout(Blob::new(3)));
+
+    reader.skip_ahead();
+    assert_eq!(reader.read(), ReadResult::Dropout(Blob::new(3)));
+    assert_eq!(reader.read(), ReadResult::Empty);
+}
+
+#[test]
+fn test_custom_data_type_one_reader_two_threads_high_throughput() {
+    let (mut reader, mut writer) = ring_buffer::<Blob>(32);
+
+    const ITERATIONS: usize = 1024 * 1024 * 64;
+
+    let reader_thread = std::thread::spawn(move || {
+        for _ in 0..ITERATIONS {
+            let Some(value) = reader.read().value() else {
+                continue;
+            };
+            assert!(value.all_equal());
+        }
+    });
+
+    let writer_thread = std::thread::spawn(move || {
+        for i in 0..ITERATIONS {
+            let b = (i & 0xff) as u8;
+            writer.write(Blob::new(b));
+        }
+    });
+
+    reader_thread.join().unwrap();
+    writer_thread.join().unwrap();
+}
+
+#[test]
+fn test_custom_data_type_two_readers_three_threads_high_throughput() {
+    let (mut reader1, mut writer) = ring_buffer::<Blob>(32);
+    let mut reader2 = reader1.clone();
+
+    const ITERATIONS: usize = 1024 * 1024 * 64;
+
+    let reader1_thread = std::thread::spawn(move || {
+        for _ in 0..ITERATIONS {
+            let Some(value) = reader1.read().value() else {
+                continue;
+            };
+            assert!(value.all_equal());
+        }
+    });
+
+    let reader2_thread = std::thread::spawn(move || {
+        for _ in 0..ITERATIONS {
+            let Some(value) = reader2.read().value() else {
+                continue;
+            };
+            assert!(value.all_equal());
+        }
+    });
+
+    let writer_thread = std::thread::spawn(move || {
+        for i in 0..ITERATIONS {
+            let b = (i & 0xff) as u8;
+            writer.write(Blob::new(b));
+        }
+    });
+
+    reader1_thread.join().unwrap();
+    reader2_thread.join().unwrap();
+    writer_thread.join().unwrap();
+}
