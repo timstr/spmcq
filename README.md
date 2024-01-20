@@ -2,9 +2,9 @@
 
 A Rust library for a thread-safe single-producer, multiple-consumer bounded ring buffer (FIFO queue).
 
-This library was written with real-time audio applications in mind, where a typical scenario would be soemthing like the following:
+This library was written with real-time audio applications in mind, where a typical scenario would be something like the following:
 
--   An audio callback periodically receives buffers of new audio data from a microphone one one thread
+-   An audio callback periodically receives buffers of new audio data from a microphone on one thread
 -   A separate high-priorty audio thread needs to receive those buffers with minimum latency. This thread is assumed to read at the same frequency and so dropouts are generally unlikely
 -   A low-priority GUI thread also receives the same audio data and displays it. The GUI thread runs less often, and can tolerate a much larger latency but still ideally receives the entire audio signal in batches of old data if it needs to. Dropouts due to the GUI not being repainted are tolerable and perhaps even expected.
 
@@ -13,7 +13,7 @@ Features:
 -   Fixed-size capacity and no additional heap allocation after construction
 -   Multiple readers
 -   The writer may overtake readers without erroring or extra blocking, and readers can detect this scenario and may skip ahead
--   Low latency and low synchronization overhead (hopefully, at least; I have not rigorously tested this)
+-   Low latency and low synchronization overhead. Both reads and writes consist of a simple spin lock and a single memcopy of the item.
 
 ## Basic Usage
 
@@ -47,6 +47,6 @@ In order to skip a reader to the front of the queue, call `Reader::skip_ahead()`
 
 The stored data type `T` must be `Copy`. This constraint allows minimizing the time that readers spend holding a read lock on each item, since the lock must be held only long enough to do a memcpy of the item.
 
-## Remarks
+## TODO's
 
-This library is very new and still needs better testing, and possible some better analysis of its correctness and performance. Some extra methods such as blocking until data is available could be nice as well.
+-   Allow readers to detect hang-ups if the writer is dropped?
