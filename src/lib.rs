@@ -1,3 +1,18 @@
+//! An implementation of a bounded array-based ring buffer / circular queue that
+//! supports a single producer and multiple consumers (SPMC). Individual readers
+//! / consumers may get overtaken by the writer / producer without either of them
+//! blocking. Readers can detect when new data is available, when the queue is
+//! empty, and when they have been overtaken. Readers may also skip to the front
+//! of the queue.
+//!
+//! Currently, hang-ups are not detected. Additionally, the stored value needs
+//! to implement `Copy` and `Default`.
+//!
+//! To use a ring buffer, call [ring_buffer] to receive a [Reader] and a [Writer].
+//! Call [Writer::write] to push new data onto the queue and [Reader::read] to
+//! receive the new data. Pass both readers and writer to different threads and
+//! clone new readers as desired.
+
 use std::{
     cell::UnsafeCell,
     sync::{
@@ -25,6 +40,9 @@ struct Item<T> {
     data: UnsafeCell<T>,
 }
 
+/// The receiving end of a ring buffer, which reads data from the [Writer] that it was
+/// created with by calling [ring_buffer]. Call [Reader::read] to receive new data if
+/// it's, available, and clone the reader to create additional readers.
 pub struct Reader<T> {
     data: Arc<[Item<T>]>,
     write_index: Arc<AtomicUsize>,
@@ -32,20 +50,35 @@ pub struct Reader<T> {
     lap_count: u16,
 }
 
-unsafe impl<T> Send for Reader<T> {}
+unsafe impl<T> Send for Reader<T> where T: Send {}
 
+/// The sending end of a ring buffer, which passes data to any [Reader] instances
+/// created from calling [ring_buffer]. Call [Writer::write] to make new data
+/// available, at risk of overwriting old data and overtaking readers.
 pub struct Writer<T> {
     data: Arc<[Item<T>]>,
     write_index: Arc<AtomicUsize>,
     lap_count: u16,
 }
 
-unsafe impl<T> Send for Writer<T> {}
+unsafe impl<T> Send for Writer<T> where T: Send {}
 
+/// Construct a new ring buffer consisting of a [Reader] and a [Writer].
+/// The internal buffer will have the specified capacity, and no
+/// additional heap allocation will be performed by either the readers
+/// or the writer. A larger capacity means that more past data will be
+/// retained before being overwritten, and slower readers will have a
+/// better chance of observing all data, though it also increases memory
+/// usage.
+///
+/// # Panics
+/// Panics if the capacity is less than 2.
 pub fn ring_buffer<T>(capacity: usize) -> (Reader<T>, Writer<T>)
 where
     T: Default,
 {
+    assert!(capacity >= 2);
+
     let mut data = Vec::<Item<T>>::new();
     data.resize_with(capacity, || Item {
         use_count: AtomicI16::new(0),
@@ -77,14 +110,24 @@ where
     (reader, writer)
 }
 
+/// The result of reading from a ring buffer by [Reader::read]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ReadResult<T> {
+    /// New data was received, and the reader is somewhere in the middle of the queue.
     Ok(T),
+
+    /// New data was received, but the reader was overtaken by the writer since its
+    /// last read, and so some data was lost. Consider calling [Reader::skip_ahead]
+    /// immediately before the next read to drop additional data but recover from
+    /// any latency that might have accumulated.
     Dropout(T),
+
+    /// The reader is at the very front of the queue and no new data is available.
     Empty,
 }
 
 impl<T> ReadResult<T> {
+    /// Returns whether self is [ReadResult::Ok]
     pub fn is_ok(&self) -> bool {
         match self {
             ReadResult::Ok(_) => true,
@@ -92,6 +135,7 @@ impl<T> ReadResult<T> {
         }
     }
 
+    /// Returns whether self is [ReadResult::Dropout]
     pub fn is_dropout(&self) -> bool {
         match self {
             ReadResult::Dropout(_) => true,
@@ -99,6 +143,7 @@ impl<T> ReadResult<T> {
         }
     }
 
+    /// Returns whether self is [ReadResult::Empty]
     pub fn is_empty(&self) -> bool {
         match self {
             ReadResult::Empty => true,
@@ -106,6 +151,8 @@ impl<T> ReadResult<T> {
         }
     }
 
+    /// If self is [ReadResult::Ok] or [ReadResult::Dropout], returns the
+    /// received value. Otherwise, returns None.
     pub fn value(self) -> Option<T> {
         match self {
             ReadResult::Ok(v) => Some(v),
@@ -119,6 +166,17 @@ impl<T> Reader<T>
 where
     T: Copy,
 {
+    /// Receive the next item in the queue if anything is available.
+    /// If the reader is somewhere in the middle of the queue, returns
+    /// [ReadResult::Ok] with the next item. If the reader has beenovertaken
+    /// by the writer since its last read, returns [ReadResult::Dropout]
+    /// with a more recent item to indicate that some items were lost.
+    /// Otherwise, if the reader is fully caught up to writer and no new
+    /// data is available, returns [ReadResult::Empty].
+    ///
+    /// This method uses a spin lock and may busy-wait for a short duration
+    /// if the writer happens to be writing to the same position as the
+    /// reader. The guarded section performs only a trivial copy of the data.
     pub fn read(&mut self) -> ReadResult<T> {
         // Get the item to be read from
         let item = &self.data[self.read_index];
@@ -183,6 +241,14 @@ where
         }
     }
 
+    /// Immediately advance the reader to the front of the queue and catch
+    /// up with the reader. This method should ideally only be used right
+    /// before a call to [Reader::read], since otherwise the reader could
+    /// overtake the writer again. The next result of reading will always be
+    /// [ReadResult::Dropout] regardless of whether data was actually lost.
+    ///
+    /// Calling this method multiple times in between reads may result
+    /// in the same item being observed multiple times.
     pub fn skip_ahead(&mut self) {
         // Because the write_index typically points to the index that the
         // writer is _going_ to write to, subtract one so that we point
@@ -212,6 +278,14 @@ impl<T> Clone for Reader<T> {
 }
 
 impl<T> Writer<T> {
+    /// Write new data onto the queue, possibly overwriting old data. Any readers
+    /// that were fully caught up will see the new data with [ReadResult::Ok],
+    /// while any readers that get overtaken will see the new data but with
+    /// [ReadResult::Dropout] instead.
+    ///
+    /// This method uses a spin lock and may busy-wait for a short duration if
+    /// any readers happen to be actively reading from the very back of the
+    /// queue. The guarded section is performs only a trivial copy of the data.
     pub fn write(&mut self, value: T) {
         // Get the current write index
         let index = self.write_index.load(Ordering::SeqCst);

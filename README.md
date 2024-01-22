@@ -1,4 +1,4 @@
-# ringbuffer
+# spmcq
 
 A Rust library for a thread-safe single-producer, multiple-consumer bounded ring buffer (FIFO queue).
 

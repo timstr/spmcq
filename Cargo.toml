@@ -1,7 +1,12 @@
 [package]
-name = "ringbuffer"
+name = "spmcq"
 version = "0.1.0"
 edition = "2021"
+authors = ["Tim Straubinger"]
+description = "A Rust library for a thread-safe single-producer, multiple-consumer bounded ring buffer (FIFO queue)"
+repository = "https://github.com/timstr/spmcq"
+license = "MIT"
+keywords = ["spmc", "queue", "ringbuffer", "fifo", "ipc"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
