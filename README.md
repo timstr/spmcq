@@ -34,7 +34,7 @@ std::thread::spawn(move ||{
         match reader.read() {
             ReadResult::Ok(i) => println!("Received {}", i),
             ReadResult::Dropout(i) => println!("Received {} but lost some values", i),
-            ReadResult::Empty(i) => println("No new data"),
+            ReadResult::Empty => println("No new data"),
         }
         std::thread::sleep(Duration::from_millis(1));
     }
